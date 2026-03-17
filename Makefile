@@ -35,6 +35,10 @@ deps:
 	else \
 		echo '[teleop] OpenVR SDK already present ($(OPENVR_SDK_DIR))'; \
 	fi
+	@if [ ! -f go.mod ]; then \
+		echo '[teleop] Initializing Go module...'; \
+		$(GO) mod init github.com/viam-labs/vr-teleop; \
+	fi
 	@echo '[teleop] Tidying Go modules...'
 	@$(GO) mod tidy
 
