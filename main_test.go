@@ -409,3 +409,70 @@ func TestQuatToOVDeg_ViamRef(t *testing.T) {
 	ox, oy, oz, th = quatToOVDeg(q(-0.17555966025413142, 0.39198397193979817, 0.3855375485164001, 0.816632212270443))
 	ovEq(t, "case8", ox, oy, oz, th, 0.5048437942940054, 0.5889844266763397, 0.631054742867507, 0.02*rad2deg)
 }
+
+// ---------------------------------------------------------------------------
+// Dead-zone filtering
+// ---------------------------------------------------------------------------
+
+func TestExceedsDeadzone_NilLastSent(t *testing.T) {
+	p := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	if !exceedsDeadzone(nil, p, 0.5, 1.0) {
+		t.Error("expected true for nil lastSent (first frame)")
+	}
+}
+
+func TestExceedsDeadzone_IdenticalPose(t *testing.T) {
+	p := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 45}
+	if exceedsDeadzone(&p, p, 0.5, 1.0) {
+		t.Error("expected false for identical poses")
+	}
+}
+
+func TestExceedsDeadzone_PositionAbove(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 101, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	if !exceedsDeadzone(&last, next, 0.5, 1.0) {
+		t.Error("expected true: position delta 1mm > threshold 0.5mm")
+	}
+}
+
+func TestExceedsDeadzone_PositionBelow(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 100.3, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	if exceedsDeadzone(&last, next, 0.5, 1.0) {
+		t.Error("expected false: position delta 0.3mm < threshold 0.5mm")
+	}
+}
+
+func TestExceedsDeadzone_RotationAbove(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 5}
+	if !exceedsDeadzone(&last, next, 0.5, 1.0) {
+		t.Error("expected true: rotation delta 5deg > threshold 1deg")
+	}
+}
+
+func TestExceedsDeadzone_RotationBelow(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0.3}
+	if exceedsDeadzone(&last, next, 0.5, 1.0) {
+		t.Error("expected false: rotation delta 0.3deg < threshold 1deg")
+	}
+}
+
+func TestExceedsDeadzone_BothZeroDisablesFilter(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 100.001, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0.001}
+	if !exceedsDeadzone(&last, next, 0, 0) {
+		t.Error("expected true: both thresholds 0 disables filtering")
+	}
+}
+
+func TestExceedsDeadzone_OnlyPosThreshold(t *testing.T) {
+	last := pose{x: 100, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	next := pose{x: 100.1, y: 200, z: 300, ox: 0, oy: 0, oz: 1, thetaDeg: 0}
+	// rotDeadzone=0 means rotation is always "exceeds", so any tiny move sends
+	if !exceedsDeadzone(&last, next, 0.5, 0) {
+		t.Error("expected true: rot threshold 0 disables rot filtering")
+	}
+}

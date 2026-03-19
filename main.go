@@ -389,7 +389,13 @@ type discoveredController struct {
 	serial string
 }
 
-var controllersLogged bool
+var (
+	controllersAssigned    bool
+	serialWaitLogged       bool
+	firstControllerSeenAt  time.Time
+)
+
+const serialWaitTimeout = 15 * time.Second
 
 func findControllers(leftOverride, rightOverride, calibDir string) (left, right *string) {
 	if leftOverride != "" {
@@ -420,11 +426,8 @@ func findControllers(leftOverride, rightOverride, calibDir string) (left, right 
 		return
 	}
 
-	if !controllersLogged {
-		for _, c := range controllers {
-			fmt.Printf("[vr] controller %s serial=%s\n", c.name, c.serial)
-		}
-		controllersLogged = true
+	if firstControllerSeenAt.IsZero() {
+		firstControllerSeenAt = time.Now()
 	}
 
 	// If overrides are set, fill in what we can and return.
@@ -438,6 +441,35 @@ func findControllers(leftOverride, rightOverride, calibDir string) (left, right 
 			}
 		}
 		return
+	}
+
+	// Check if all controllers have serials.
+	allSerialsAvailable := true
+	for _, c := range controllers {
+		if c.serial == "" {
+			allSerialsAvailable = false
+			break
+		}
+	}
+
+	// Wait for serials unless we've timed out.
+	if !allSerialsAvailable && time.Since(firstControllerSeenAt) < serialWaitTimeout {
+		if !serialWaitLogged {
+			fmt.Println("[vr] waiting for controller serial numbers...")
+			serialWaitLogged = true
+		}
+		return
+	}
+
+	if allSerialsAvailable && !controllersAssigned {
+		for _, c := range controllers {
+			fmt.Printf("[vr] controller %s serial=%s\n", c.name, c.serial)
+		}
+	} else if !allSerialsAvailable && !controllersAssigned {
+		fmt.Println("[vr] warning: serial numbers not available, using discovery order (may be inconsistent)")
+		for _, c := range controllers {
+			fmt.Printf("[vr] controller %s serial=%s\n", c.name, c.serial)
+		}
 	}
 
 	// Use serial-based mapping.
@@ -464,8 +496,7 @@ func findControllers(leftOverride, rightOverride, calibDir string) (left, right 
 		}
 	}
 
-	// If both serials mapped to the same controller (shouldn't happen, but handle it),
-	// keep left and randomly reassign right.
+	// If both serials mapped to the same controller, keep left and reassign right.
 	if leftName != "" && rightName != "" && leftName == rightName {
 		rightName = ""
 	}
@@ -509,9 +540,11 @@ func findControllers(leftOverride, rightOverride, calibDir string) (left, right 
 	if needSave {
 		saveControllerMap(calibDir, cm)
 		fmt.Printf("[vr] controller map saved: left=%s right=%s\n", cm.Left, cm.Right)
-	} else if cm.Left != "" || cm.Right != "" {
-		fmt.Printf("[vr] controller map: left=%s right=%s\n", cm.Left, cm.Right)
+	} else if !controllersAssigned && (cm.Left != "" || cm.Right != "") {
+		fmt.Printf("[vr] controller map matched: left=%s right=%s\n", cm.Left, cm.Right)
 	}
+
+	controllersAssigned = true
 
 	if leftName != "" {
 		left = &leftName
@@ -678,6 +711,12 @@ type teleopHand struct {
 	// session logging
 	logFile *os.File
 
+	// dead-zone filtering: only send commands when pose changes enough
+	posDeadzone      float64 // position dead-zone in mm
+	rotDeadzone      float64 // rotation dead-zone in degrees
+	lastSentPose     *pose   // nil = send next unconditionally
+	deadzoneFiltered int     // count of frames suppressed since last send
+
 	// reference capture (on grip press)
 	ctrlRefPos      [3]float64
 	ctrlRefRotRobot mgl64.Mat4
@@ -693,7 +732,7 @@ const (
 	errorHapticIntvl = 200 * time.Millisecond
 )
 
-func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled bool) *teleopHand {
+func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled bool, posDeadzone, rotDeadzone float64) *teleopHand {
 	h := &teleopHand{
 		name:            name,
 		armName:         armName,
@@ -704,6 +743,8 @@ func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled 
 		armFrameMat:     mgl64.Ident4(),
 		ctrlToArmOffset: mgl64.Ident4(),
 		gripperNotify:   make(chan struct{}, 1),
+		posDeadzone:     posDeadzone,
+		rotDeadzone:     rotDeadzone,
 	}
 	h.gripperDesired.Store(830) // start fully open
 	return h
@@ -961,6 +1002,7 @@ func (h *teleopHand) startControl(ctx context.Context, cs ControllerState) {
 		}
 
 		h.errorTimeout = time.Time{}
+		h.lastSentPose = nil
 		h.isControlling = true
 		h.sendHaptic(0.5, 100)
 		fmt.Printf("[%s] control started at (%.1f, %.1f, %.1f)\n", h.name, pt.X, pt.Y, pt.Z)
@@ -1008,6 +1050,17 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 		return
 	}
 
+	// Dead-zone filter: suppress command if movement is below threshold.
+	candidate := pose{x: tx, y: ty, z: tz, ox: tox, oy: toy, oz: toz, thetaDeg: thetaDeg}
+	if !exceedsDeadzone(h.lastSentPose, candidate, h.posDeadzone, h.rotDeadzone) {
+		h.deadzoneFiltered++
+		return
+	}
+	if h.deadzoneFiltered > 0 {
+		fmt.Printf("[%s] deadzone: suppressed %d frames\n", h.name, h.deadzoneFiltered)
+		h.deadzoneFiltered = 0
+	}
+
 	h.lastCmdTime = now
 
 	// teleop_move is non-blocking server-side — fire async so poll loop
@@ -1026,6 +1079,7 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 		if !h.movePending.CompareAndSwap(false, true) {
 			return // prior teleop_move still in flight; skip this frame
 		}
+		h.lastSentPose = &candidate
 		go func() {
 			defer h.movePending.Store(false)
 			if _, err := h.motionSvc.DoCommand(ctx, map[string]interface{}{
@@ -1252,6 +1306,8 @@ func main() {
 	rotEnabled := flag.Bool("rotation", true, "Enable orientation tracking")
 	leftCtrl := flag.String("left-controller", "", "libsurvive object name for left controller (e.g. WM0)")
 	rightCtrl := flag.String("right-controller", "", "libsurvive object name for right controller (e.g. WM1)")
+	posDeadzone := flag.Float64("pos-deadzone", 0.5, "Position dead-zone in mm (0 to disable)")
+	rotDeadzone := flag.Float64("rot-deadzone", 1.0, "Rotation dead-zone in degrees (0 to disable)")
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -1284,12 +1340,12 @@ func main() {
 	defer robot.Close(ctx)
 	fmt.Println("[teleop] Connected to robot")
 
-	left := newTeleopHand("left", *leftArm, *leftGripper, *scale, *rotEnabled)
+	left := newTeleopHand("left", *leftArm, *leftGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone)
 	if err := left.connect(ctx, robot); err != nil {
 		fmt.Fprintf(os.Stderr, "[teleop] Left hand: %v\n", err)
 	}
 
-	right := newTeleopHand("right", *rightArm, *rightGripper, *scale, *rotEnabled)
+	right := newTeleopHand("right", *rightArm, *rightGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone)
 	if err := right.connect(ctx, robot); err != nil {
 		fmt.Fprintf(os.Stderr, "[teleop] Right hand: %v\n", err)
 	}
