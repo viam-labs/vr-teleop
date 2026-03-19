@@ -19,7 +19,7 @@
     }
   ],
   "markdown_link": "README.md",
-  "entrypoint": "bin/run.sh",
+  "entrypoint": "run.sh",
   "first_run": "",
   "build": {
     "build": "make module.tar.gz",

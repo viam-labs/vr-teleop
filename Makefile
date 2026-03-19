@@ -11,7 +11,7 @@ LIBSURVIVE_LIB  := $(LIBSURVIVE_DIR)/lib/libsurvive.so
 CMAKE_EXTRA :=
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
 ifneq ($(BREW_PREFIX),)
-  CMAKE_EXTRA += -DCMAKE_PREFIX_PATH=$(BREW_PREFIX) -DLIBUSB_LIBRARY=$(BREW_PREFIX)/lib/libusb-1.0.dylib -DUSE_HIDAPI=ON -DCMAKE_SHARED_LINKER_FLAGS=-L$(BREW_PREFIX)/lib -DCMAKE_MODULE_LINKER_FLAGS=-L$(BREW_PREFIX)/lib
+  CMAKE_EXTRA += -DCMAKE_PREFIX_PATH=$(BREW_PREFIX) -DLIBUSB_LIBRARY=$(BREW_PREFIX)/lib/libusb-1.0.dylib -DUSE_HIDAPI=ON -DCMAKE_SHARED_LINKER_FLAGS=-L$(BREW_PREFIX)/lib -DCMAKE_MODULE_LINKER_FLAGS=-L$(BREW_PREFIX)/lib -DCMAKE_EXE_LINKER_FLAGS=-L$(BREW_PREFIX)/lib
   LIBSURVIVE_LIB := $(LIBSURVIVE_DIR)/lib/libsurvive.dylib
 endif
 
@@ -70,8 +70,8 @@ pair: $(LIBSURVIVE_LIB)
 	DYLD_LIBRARY_PATH=$(CURDIR)/$(LIBSURVIVE_DIR)/lib LD_LIBRARY_PATH=$(CURDIR)/$(LIBSURVIVE_DIR)/lib \
 		$(LIBSURVIVE_DIR)/bin/survive-cli --pair-device
 
-module.tar.gz: meta.json $(MODULE_BINARY) bin/run.sh
-	tar czf $@ meta.json $(MODULE_BINARY) bin/run.sh $(LIBSURVIVE_DIR)/lib
+module.tar.gz: meta.json $(MODULE_BINARY) run.sh
+	tar czf $@ meta.json $(MODULE_BINARY) run.sh $(LIBSURVIVE_DIR)/lib
 
 module: test module.tar.gz
 
