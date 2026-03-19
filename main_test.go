@@ -122,12 +122,12 @@ func TestApplyCalib_ZeroYaw(t *testing.T) {
 	})
 }
 
-// 90° yaw: position (1,0,0) → (0,0,1)
+// 90° yaw: position (1,0,0) → (0,1,0)
 func TestApplyCalib_Pos90(t *testing.T) {
 	cs := calibState([3]float64{1, 5, 0}, mgl64.Ident4())
 	withCalib(math.Pi/2, func() {
 		out := applyCalib(cs)
-		posEq(t, "pos", out.Pos, [3]float64{0, 5, 1})
+		posEq(t, "pos", out.Pos, [3]float64{-5, 1, 0})
 	})
 }
 
@@ -140,13 +140,13 @@ func TestApplyCalib_Pos180(t *testing.T) {
 	})
 }
 
-// calib rotation must not affect Y component of position
-func TestApplyCalib_YUnchanged(t *testing.T) {
+// calib rotation must not affect Z component of position
+func TestApplyCalib_ZUnchanged(t *testing.T) {
 	cs := calibState([3]float64{3, 7, 2}, mgl64.Ident4())
 	withCalib(1.23, func() {
 		out := applyCalib(cs)
-		if !approxEq(out.Pos[1], 7, eps) {
-			t.Errorf("Y position changed: got %.5f, want 7", out.Pos[1])
+		if !approxEq(out.Pos[2], 2, eps) {
+			t.Errorf("Z position changed: got %.5f, want 2", out.Pos[2])
 		}
 	})
 }
@@ -251,38 +251,37 @@ func TestSimilarityTransform_Conjugation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// steamVRTransform constant
+// lighthouseTransform constant
 // ---------------------------------------------------------------------------
 
-func TestSteamVRTransform_Value(t *testing.T) {
-	// steamVRTransform = rotZ(-90°) * rotX(90°)
-	rotX := mgl64.HomogRotate3DX(math.Pi / 2)
-	rotZ := mgl64.HomogRotate3DZ(-math.Pi / 2)
-	want := mgl64.Mat4ToQuat(rotZ.Mul4(rotX)).Normalize()
-	got := mgl64.Mat4ToQuat(steamVRTransform).Normalize()
-	quatEq(t, "steamVRTransform", got, want)
+func TestLighthouseTransform_Value(t *testing.T) {
+	// lighthouseTransform = rotZ(+90°)
+	want := mgl64.Mat4ToQuat(mgl64.HomogRotate3DZ(math.Pi / 2)).Normalize()
+	got := mgl64.Mat4ToQuat(lighthouseTransform).Normalize()
+	quatEq(t, "lighthouseTransform", got, want)
 }
 
-func TestSteamVRTransform_BasisVectors(t *testing.T) {
-	// Without calibration (user facing SteamVR -Z):
-	//   -Z → +X (forward), +Y → +Z (up), +X → -Y (right)
+func TestLighthouseTransform_BasisVectors(t *testing.T) {
+	// libsurvive: X-left, -Y-forward, Z-up
+	// Viam:       X-forward, Y-left, Z-up
+	// rotZ(+90°): -Y→+X, +X→+Y, +Z→+Z
 
-	// Room +Y (0,1,0) → Robot +Z (0,0,1)
-	v := steamVRTransform.Mul4x1(mgl64.Vec4{0, 1, 0, 0})
-	if !approxEq(v[0], 0, eps) || !approxEq(v[1], 0, eps) || !approxEq(v[2], 1, eps) {
-		t.Errorf("Room+Y: got (%.5f, %.5f, %.5f), want (0, 0, 1)", v[0], v[1], v[2])
-	}
-
-	// Room -Z (0,0,-1) → Robot +X (1,0,0) [forward]
-	v = steamVRTransform.Mul4x1(mgl64.Vec4{0, 0, -1, 0})
+	// -Y (forward) → +X (robot forward)
+	v := lighthouseTransform.Mul4x1(mgl64.Vec4{0, -1, 0, 0})
 	if !approxEq(v[0], 1, eps) || !approxEq(v[1], 0, eps) || !approxEq(v[2], 0, eps) {
-		t.Errorf("Room-Z: got (%.5f, %.5f, %.5f), want (1, 0, 0)", v[0], v[1], v[2])
+		t.Errorf("-Y→+X: got (%.5f, %.5f, %.5f), want (1, 0, 0)", v[0], v[1], v[2])
 	}
 
-	// Room +X (1,0,0) → Robot -Y (0,-1,0) [right]
-	v = steamVRTransform.Mul4x1(mgl64.Vec4{1, 0, 0, 0})
-	if !approxEq(v[0], 0, eps) || !approxEq(v[1], -1, eps) || !approxEq(v[2], 0, eps) {
-		t.Errorf("Room+X: got (%.5f, %.5f, %.5f), want (0, -1, 0)", v[0], v[1], v[2])
+	// +X (left) → +Y (robot left)
+	v = lighthouseTransform.Mul4x1(mgl64.Vec4{1, 0, 0, 0})
+	if !approxEq(v[0], 0, eps) || !approxEq(v[1], 1, eps) || !approxEq(v[2], 0, eps) {
+		t.Errorf("+X→+Y: got (%.5f, %.5f, %.5f), want (0, 1, 0)", v[0], v[1], v[2])
+	}
+
+	// +Z (up) → +Z (robot up)
+	v = lighthouseTransform.Mul4x1(mgl64.Vec4{0, 0, 1, 0})
+	if !approxEq(v[0], 0, eps) || !approxEq(v[1], 0, eps) || !approxEq(v[2], 1, eps) {
+		t.Errorf("+Z→+Z: got (%.5f, %.5f, %.5f), want (0, 0, 1)", v[0], v[1], v[2])
 	}
 }
 

@@ -1,12 +1,12 @@
-// SteamVR → Viam VR teleop (Go, E2E).
+// libsurvive → Viam VR teleop (Go, E2E).
 //
-// Reads Vive Wand controller poses and button states from SteamVR/OpenVR
+// Reads Vive Wand controller poses and button states from libsurvive
 // and sends arm/gripper commands directly to a Viam robot at ~90 Hz.
-// No frontend or WebSocket required.
+// No frontend, SteamVR, or WebSocket required.
 //
 // Build requirements:
 //
-//	make deps    # downloads the OpenVR SDK into openvr-sdk/
+//	make deps    # builds libsurvive from source into libsurvive/
 //	make build   # compiles the binary
 //
 // Usage:
@@ -16,114 +16,26 @@
 package main
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/openvr-sdk/headers
-#cgo LDFLAGS: -L${SRCDIR}/openvr-sdk/lib/linux64 -lopenvr_api
-#include "openvr_capi.h"
+#cgo CFLAGS: -I${SRCDIR}/libsurvive/include -I${SRCDIR}/libsurvive/include/libsurvive -I${SRCDIR}/libsurvive/include/libsurvive/redist -DSURVIVE_ENABLE_FULL_API
+#cgo LDFLAGS: -L${SRCDIR}/libsurvive/lib -lsurvive -Wl,-rpath,${SRCDIR}/libsurvive/lib
+#include <survive_api.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
-// openvr_capi.h wraps the global entry points in '#if 0', so they won't be
-// declared for us. The symbols are exported from libopenvr_api.so, so we
-// declare them directly here and let the linker resolve them.
-extern intptr_t VR_InitInternal(EVRInitError *peError, EVRApplicationType eType);
-extern void     VR_ShutdownInternal(void);
-extern intptr_t VR_GetGenericInterface(const char *pchInterfaceVersion, EVRInitError *peError);
+static SurviveSimpleContext *gCtx = NULL;
 
-static struct VR_IVRSystem_FnTable *gVRSystem = NULL;
-static struct VR_IVRInput_FnTable  *gVRInput  = NULL;
-
-// Action set and per-action handles.
-// Indices 0-4 are left-hand actions, 5-9 are right-hand, in order:
-//   base+0 trigger (vector1), base+1 grip (boolean), base+2 menu (boolean),
-//   base+3 trackpad (vector2), base+4 trackpad press (boolean)
-static VRActionSetHandle_t gActionSet = 0;
-static VRActionHandle_t    gAct[10]   = {0,0,0,0,0,0,0,0,0,0};
-
-// vr_init initialises OpenVR and loads the IVRInput action manifest.
-// manifestPath must be the absolute path to actions.json.
-// Returns 0 on success or a non-zero EVRInitError on failure.
-static int vr_init(const char *manifestPath) {
-    char fnTable[64];
-    snprintf(fnTable, sizeof(fnTable), "FnTable:%s", IVRSystem_Version);
-
-    EVRInitError err = EVRInitError_VRInitError_None;
-    VR_InitInternal(&err, EVRApplicationType_VRApplication_Background);
-    if (err != EVRInitError_VRInitError_None)
-        return (int)err;
-
-    gVRSystem = (struct VR_IVRSystem_FnTable *)VR_GetGenericInterface(fnTable, &err);
-    if (err != EVRInitError_VRInitError_None || gVRSystem == NULL) {
-        VR_ShutdownInternal();
-        return (int)(err ? err : 1);
-    }
-
-    // IVRInput — required for SteamVR Input 2.0 button/axis data.
-    char inputFnTable[64];
-    snprintf(inputFnTable, sizeof(inputFnTable), "FnTable:%s", IVRInput_Version);
-    EVRInitError inputErr = EVRInitError_VRInitError_None;
-    gVRInput = (struct VR_IVRInput_FnTable *)VR_GetGenericInterface(inputFnTable, &inputErr);
-    if (gVRInput == NULL) {
-        printf("[vr] Warning: IVRInput unavailable (err=%d); buttons won't work\n", (int)inputErr);
-        return 0;
-    }
-
-    EVRInputError mErr = gVRInput->SetActionManifestPath((char *)manifestPath);
-    if (mErr != EVRInputError_VRInputError_None) {
-        printf("[vr] Warning: SetActionManifestPath(%s) failed (err=%d)\n", manifestPath, (int)mErr);
-    } else {
-        printf("[vr] Action manifest loaded: %s\n", manifestPath);
-    }
-
-    gVRInput->GetActionSetHandle("/actions/teleop", &gActionSet);
-
-    static const char *names[10] = {
-        "/actions/teleop/in/left_trigger",
-        "/actions/teleop/in/left_grip",
-        "/actions/teleop/in/left_menu",
-        "/actions/teleop/in/left_trackpad",
-        "/actions/teleop/in/left_trackpad_press",
-        "/actions/teleop/in/right_trigger",
-        "/actions/teleop/in/right_grip",
-        "/actions/teleop/in/right_menu",
-        "/actions/teleop/in/right_trackpad",
-        "/actions/teleop/in/right_trackpad_press",
-    };
-    for (int i = 0; i < 10; i++)
-        gVRInput->GetActionHandle((char *)names[i], &gAct[i]);
-
-    printf("[vr] IVRInput ready (actionSet=0x%llx, IsUsingLegacyInput=%d)\n",
-           (unsigned long long)gActionSet, (int)gVRInput->IsUsingLegacyInput());
-    return 0;
-}
-
-static void vr_shutdown(void) {
-    gVRSystem  = NULL;
-    gVRInput   = NULL;
-    gActionSet = 0;
-    VR_ShutdownInternal();
-}
-
-// vr_update_input must be called once per frame before reading action data.
-static void vr_update_input(void) {
-    if (!gVRInput || gActionSet == 0) return;
-    VRActiveActionSet_t active;
-    memset(&active, 0, sizeof(active));
-    active.ulActionSet = gActionSet;
-    gVRInput->UpdateActionState(&active, sizeof(VRActiveActionSet_t), 1);
-}
-
-static unsigned int vr_get_device_class(unsigned int idx) {
-    if (!gVRSystem) return 0;
-    return (unsigned int)gVRSystem->GetTrackedDeviceClass(idx);
-}
-
-static unsigned int vr_get_controller_role(unsigned int idx) {
-    if (!gVRSystem) return 0;
-    return (unsigned int)gVRSystem->GetControllerRoleForTrackedDeviceIndex(idx);
+// Log callback that suppresses noisy libsurvive output.
+static void vr_log_fn(struct SurviveSimpleContext *ctx, SurviveLogLevel logLevel, const char *msg) {
+    if (logLevel == SURVIVE_LOG_LEVEL_WARNING) return;
+    // Filter out spammy info messages.
+    if (msg && (strstr(msg, "OOTX") || strstr(msg, "Bad sync") || strstr(msg, "Preamble"))) return;
+    printf("%s", msg);
 }
 
 // VRControllerData carries per-controller data back to Go.
+// Layout produces the same format the Go bridge functions expect.
 typedef struct {
     int      stateValid;
     int      poseValid;
@@ -133,76 +45,133 @@ typedef struct {
     float    axis1x;         // trigger value (0–1)
 } VRControllerData;
 
-static void vr_haptic_pulse(unsigned int idx, unsigned short durationUs) {
-    if (!gVRSystem) return;
-    gVRSystem->TriggerHapticPulse((TrackedDeviceIndex_t)idx, 0, durationUs);
+// quat_to_mat34 converts a SurvivePose (position + wxyz quaternion)
+// to a row-major 3×4 matrix.
+static void quat_to_mat34(const SurvivePose *pose, float mat[12]) {
+    double w = pose->Rot[0], x = pose->Rot[1], y = pose->Rot[2], z = pose->Rot[3];
+    // Row 0
+    mat[0]  = (float)(1 - 2*(y*y + z*z));
+    mat[1]  = (float)(2*(x*y - w*z));
+    mat[2]  = (float)(2*(x*z + w*y));
+    mat[3]  = (float)(pose->Pos[0]);
+    // Row 1
+    mat[4]  = (float)(2*(x*y + w*z));
+    mat[5]  = (float)(1 - 2*(x*x + z*z));
+    mat[6]  = (float)(2*(y*z - w*x));
+    mat[7]  = (float)(pose->Pos[1]);
+    // Row 2
+    mat[8]  = (float)(2*(x*z - w*y));
+    mat[9]  = (float)(2*(y*z + w*x));
+    mat[10] = (float)(1 - 2*(x*x + y*y));
+    mat[11] = (float)(pose->Pos[2]);
 }
 
-// vr_get_controller reads pose via the legacy API (always works) and
-// button/axis data via IVRInput. isLeft: 1=left hand, 0=right hand.
-static VRControllerData vr_get_controller(unsigned int idx, int isLeft) {
+// vr_init initialises libsurvive. pluginPath is the directory containing
+// driver/poser plugins (e.g. "libsurvive/lib/libsurvive/plugins").
+// Returns 0 on success.
+static int vr_init(const char *pluginPath) {
+    if (pluginPath && pluginPath[0]) {
+        setenv("SURVIVE_PLUGINS", pluginPath, 1);
+    }
+    char *args[] = {"vr-teleop"};
+    gCtx = survive_simple_init_with_logger(1, args, vr_log_fn);
+    if (!gCtx) return 1;
+    survive_simple_start_thread(gCtx);
+    printf("[vr] libsurvive initialized\n");
+    return 0;
+}
+
+static void vr_shutdown(void) {
+    if (gCtx) {
+        survive_simple_close(gCtx);
+        gCtx = NULL;
+    }
+}
+
+static int vr_is_running(void) {
+    return gCtx && survive_simple_is_running(gCtx) ? 1 : 0;
+}
+
+// vr_poll_events drains the event queue. Call once per frame.
+// Button/axis state is accumulated inside libsurvive and queried
+// per-object via survive_simple_object_get_button_mask / get_input_axis.
+static void vr_poll_events(void) {
+    if (!gCtx) return;
+    SurviveSimpleEvent event;
+    while (survive_simple_next_event(gCtx, &event) != SurviveSimpleEventType_None) {
+        // Draining the queue updates internal state for button/axis queries.
+    }
+}
+
+// vr_object_count returns the number of tracked objects.
+static int vr_object_count(void) {
+    if (!gCtx) return 0;
+    return (int)survive_simple_get_object_count(gCtx);
+}
+
+// vr_get_object_info writes the name, serial, and type of the i-th object.
+// Returns 1 if the object is a controller (OBJECT type), 0 otherwise.
+static int vr_get_object_info(int idx, char *nameBuf, int nameBufLen, char *serialBuf, int serialBufLen) {
+    if (!gCtx) return 0;
+    const SurviveSimpleObject *obj = survive_simple_get_first_object(gCtx);
+    for (int i = 0; i < idx && obj; i++) {
+        obj = survive_simple_get_next_object(gCtx, obj);
+    }
+    if (!obj) return 0;
+    const char *name = survive_simple_object_name(obj);
+    if (name) {
+        strncpy(nameBuf, name, nameBufLen - 1);
+        nameBuf[nameBufLen - 1] = '\0';
+    }
+    const char *serial = survive_simple_serial_number(obj);
+    if (serial) {
+        strncpy(serialBuf, serial, serialBufLen - 1);
+        serialBuf[serialBufLen - 1] = '\0';
+    } else {
+        serialBuf[0] = '\0';
+    }
+    return survive_simple_object_get_type(obj) == SurviveSimpleObject_OBJECT ? 1 : 0;
+}
+
+// vr_get_controller_by_name reads pose and button/axis state for a named object.
+static VRControllerData vr_get_controller_by_name(const char *name) {
     VRControllerData out;
     memset(&out, 0, sizeof(out));
-    if (!gVRSystem) return out;
+    if (!gCtx) return out;
 
-    VRControllerState_t state;
-    TrackedDevicePose_t pose;
-    memset(&state, 0, sizeof(state));
-    memset(&pose,  0, sizeof(pose));
-
-    bool ok = gVRSystem->GetControllerStateWithPose(
-        ETrackingUniverseOrigin_TrackingUniverseStanding,
-        (TrackedDeviceIndex_t)idx,
-        &state, sizeof(state),
-        &pose
-    );
-    if (!ok) return out;
+    if (!survive_simple_is_running(gCtx)) return out;
+    SurviveSimpleObject *obj = survive_simple_get_object(gCtx, name);
+    if (!obj) return out;
 
     out.stateValid = 1;
-    if (pose.bPoseIsValid) {
+
+    SurvivePose pose;
+    FLT timecode = survive_simple_object_get_latest_pose(obj, &pose);
+    if (timecode > 0) {
         out.poseValid = 1;
-        for (int r = 0; r < 3; r++)
-            for (int c = 0; c < 4; c++)
-                out.mat[r*4+c] = pose.mDeviceToAbsoluteTracking.m[r][c];
+        quat_to_mat34(&pose, out.mat);
     }
 
-    if (gVRInput && gActionSet != 0) {
-        int base = isLeft ? 0 : 5;
+    // Button state via pollable queries.
+    int32_t buttons = survive_simple_object_get_button_mask(obj);
+    // Map libsurvive button IDs to our bitmask convention.
+    // SURVIVE_BUTTON_MENU=6, SURVIVE_BUTTON_GRIP=7, SURVIVE_BUTTON_TRACKPAD=1
+    if (buttons & (1 << 6))  out.pressed |= (1ULL << 1);  // menu → bit 1
+    if (buttons & (1 << 7))  out.pressed |= (1ULL << 2);  // grip → bit 2
+    if (buttons & (1 << 1))  out.pressed |= (1ULL << 32); // trackpad → bit 32
 
-        InputAnalogActionData_t trig;
-        memset(&trig, 0, sizeof(trig));
-        gVRInput->GetAnalogActionData(gAct[base+0], &trig, sizeof(trig), 0);
-        out.axis1x = trig.x;
-
-        InputDigitalActionData_t grip;
-        memset(&grip, 0, sizeof(grip));
-        gVRInput->GetDigitalActionData(gAct[base+1], &grip, sizeof(grip), 0);
-        if (grip.bState) out.pressed |= (1ULL << 2);
-
-        InputDigitalActionData_t menu;
-        memset(&menu, 0, sizeof(menu));
-        gVRInput->GetDigitalActionData(gAct[base+2], &menu, sizeof(menu), 0);
-        if (menu.bState) out.pressed |= (1ULL << 1);
-
-        InputAnalogActionData_t pad;
-        memset(&pad, 0, sizeof(pad));
-        gVRInput->GetAnalogActionData(gAct[base+3], &pad, sizeof(pad), 0);
-        out.axis0x = pad.x;
-        out.axis0y = pad.y;
-
-        InputDigitalActionData_t padPress;
-        memset(&padPress, 0, sizeof(padPress));
-        gVRInput->GetDigitalActionData(gAct[base+4], &padPress, sizeof(padPress), 0);
-        if (padPress.bState) out.pressed |= (1ULL << 32);
-    } else {
-        // Fallback to legacy (may be zero under SteamVR Input 2.0)
-        out.pressed = state.ulButtonPressed;
-        out.axis0x  = state.rAxis[0].x;
-        out.axis0y  = state.rAxis[0].y;
-        out.axis1x  = state.rAxis[1].x;
-    }
+    // Axis state via pollable queries.
+    out.axis1x = (float)survive_simple_object_get_input_axis(obj, 1); // SURVIVE_AXIS_TRIGGER
+    out.axis0x = (float)survive_simple_object_get_input_axis(obj, 2); // SURVIVE_AXIS_TRACKPAD_X
+    out.axis0y = (float)survive_simple_object_get_input_axis(obj, 3); // SURVIVE_AXIS_TRACKPAD_Y
 
     return out;
+}
+
+static void vr_haptic(const char *name, float amplitude, float duration_s) {
+    // TODO: haptics disabled — survive_simple_object_haptic may crash on macOS HIDAPI backend.
+    // Re-enable after upstream fix or investigation.
+    (void)name; (void)amplitude; (void)duration_s;
 }
 */
 import "C"
@@ -216,6 +185,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -235,15 +205,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// OpenVR constants
+// Button bitmask constants (internal convention, mapped in the C layer)
 // ---------------------------------------------------------------------------
 
 const (
-	maxTrackedDevices     = 64 // k_unMaxTrackedDeviceCount
-	deviceClassController = 2  // ETrackedDeviceClass_Controller
-	controllerRoleLeft    = 1  // ETrackedControllerRole_LeftHand
-	controllerRoleRight   = 2  // ETrackedControllerRole_RightHand
-
 	buttonMenu     uint64 = 1 << 1
 	buttonGrip     uint64 = 1 << 2
 	buttonTrackpad uint64 = 1 << 32
@@ -253,20 +218,20 @@ const (
 // 4×4 matrix math (mgl64)
 // ---------------------------------------------------------------------------
 
-// steamVRTransform is the SteamVR standing universe → Viam robot frame matrix.
+// lighthouseTransform is the Lighthouse tracking universe → Viam robot frame matrix.
 // Equivalent to rotZ(-90°) * rotX(90°) (same as the WebXR transform in the TS code).
 // Combined with calibration yaw (applied on the right), this maps:
 //
 //	User forward → Robot +X, Up(+Y) → Robot +Z, User left → Robot +Y.
 //
-// Without calibration (user facing SteamVR -Z):
+// Without calibration (user facing Lighthouse -Z):
 //
 //	-Z → +X, +Y → +Z, +X → +Y.
-var steamVRTransform = func() mgl64.Mat4 {
-	rotX := mgl64.HomogRotate3DX(math.Pi / 2)
-	rotZ := mgl64.HomogRotate3DZ(-math.Pi / 2)
-	return rotZ.Mul4(rotX)
-}()
+//
+// lighthouseTransform maps libsurvive tracking frame → Viam robot frame.
+// libsurvive uses Z-up, -Y-forward, X-left. Viam uses Z-up, X-forward, Y-left.
+// A +90° rotation around Z gives: -Y→+X (forward), +X→+Y (left), +Z→+Z (up).
+var lighthouseTransform = mgl64.HomogRotate3DZ(math.Pi / 2)
 
 // mat4ToOVDeg converts a rotation matrix to a Viam orientation vector (theta in degrees).
 // Extracts a quaternion from the matrix and delegates to quatToOVDeg.
@@ -353,8 +318,8 @@ type ControllerState struct {
 
 var nullController = ControllerState{Mat: mgl64.Ident4()}
 
-// mat34ToMat4 converts an OpenVR row-major 3×4 float32 matrix to an mgl64.Mat4.
-// OpenVR layout: m[row*4+col], mgl64 layout: column-major [col*4+row].
+// mat34ToMat4 converts a row-major 3×4 float32 matrix to an mgl64.Mat4.
+// Input layout: m[row*4+col], mgl64 layout: column-major [col*4+row].
 func mat34ToMat4(m [12]float32) mgl64.Mat4 {
 	return mgl64.Mat4{
 		float64(m[0]), float64(m[4]), float64(m[8]), 0, // column 0
@@ -364,12 +329,10 @@ func mat34ToMat4(m [12]float32) mgl64.Mat4 {
 	}
 }
 
-func readController(idx uint32, isLeft bool) *ControllerState {
-	leftFlag := C.int(0)
-	if isLeft {
-		leftFlag = 1
-	}
-	data := C.vr_get_controller(C.uint(idx), leftFlag)
+func readController(name string) *ControllerState {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	data := C.vr_get_controller_by_name(cName)
 	if data.stateValid == 0 {
 		return nil
 	}
@@ -396,33 +359,173 @@ func readController(idx uint32, isLeft bool) *ControllerState {
 	return cs
 }
 
-func findControllers() (left, right *uint32) {
-	for i := uint32(0); i < maxTrackedDevices; i++ {
-		cls := uint32(C.vr_get_device_class(C.uint(i)))
-		if cls != deviceClassController {
+// controllerMapFile persists serial→side assignments.
+const controllerMapFile = "controller_map.json"
+
+type controllerMap struct {
+	Left  string `json:"left"`  // serial number
+	Right string `json:"right"` // serial number
+}
+
+func loadControllerMap(dir string) controllerMap {
+	var m controllerMap
+	b, err := os.ReadFile(filepath.Join(dir, controllerMapFile))
+	if err != nil {
+		return m
+	}
+	json.Unmarshal(b, &m)
+	return m
+}
+
+func saveControllerMap(dir string, m controllerMap) {
+	b, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.WriteFile(filepath.Join(dir, controllerMapFile), b, 0644); err != nil {
+		fmt.Printf("[vr] failed to save controller map: %v\n", err)
+	}
+}
+
+type discoveredController struct {
+	name   string
+	serial string
+}
+
+var controllersLogged bool
+
+func findControllers(leftOverride, rightOverride, calibDir string) (left, right *string) {
+	if leftOverride != "" {
+		left = &leftOverride
+	}
+	if rightOverride != "" {
+		right = &rightOverride
+	}
+	if left != nil && right != nil {
+		return
+	}
+
+	count := int(C.vr_object_count())
+	var controllers []discoveredController
+	for i := 0; i < count; i++ {
+		var nameBuf [64]C.char
+		var serialBuf [64]C.char
+		isController := C.vr_get_object_info(C.int(i), &nameBuf[0], 64, &serialBuf[0], 64)
+		if isController != 0 {
+			controllers = append(controllers, discoveredController{
+				name:   C.GoString(&nameBuf[0]),
+				serial: C.GoString(&serialBuf[0]),
+			})
+		}
+	}
+
+	if len(controllers) == 0 {
+		return
+	}
+
+	if !controllersLogged {
+		for _, c := range controllers {
+			fmt.Printf("[vr] controller %s serial=%s\n", c.name, c.serial)
+		}
+		controllersLogged = true
+	}
+
+	// If overrides are set, fill in what we can and return.
+	if left != nil || right != nil {
+		for _, c := range controllers {
+			n := c.name
+			if left == nil {
+				left = &n
+			} else if right == nil && n != *left {
+				right = &n
+			}
+		}
+		return
+	}
+
+	// Use serial-based mapping.
+	cm := loadControllerMap(calibDir)
+
+	// Build serial→name lookup.
+	serialToName := map[string]string{}
+	for _, c := range controllers {
+		if c.serial != "" {
+			serialToName[c.serial] = c.name
+		}
+	}
+
+	// Try to match saved serials to discovered controllers.
+	var leftName, rightName string
+	if cm.Left != "" {
+		if n, ok := serialToName[cm.Left]; ok {
+			leftName = n
+		}
+	}
+	if cm.Right != "" {
+		if n, ok := serialToName[cm.Right]; ok {
+			rightName = n
+		}
+	}
+
+	// If both serials mapped to the same controller (shouldn't happen, but handle it),
+	// keep left and randomly reassign right.
+	if leftName != "" && rightName != "" && leftName == rightName {
+		rightName = ""
+	}
+
+	// Assign any unmatched controllers to open slots.
+	assigned := map[string]bool{}
+	if leftName != "" {
+		assigned[leftName] = true
+	}
+	if rightName != "" {
+		assigned[rightName] = true
+	}
+	for _, c := range controllers {
+		if assigned[c.name] {
 			continue
 		}
-		role := uint32(C.vr_get_controller_role(C.uint(i)))
-		idx := i
-		switch role {
-		case controllerRoleLeft:
-			left = &idx
-		case controllerRoleRight:
-			right = &idx
+		if leftName == "" {
+			leftName = c.name
+			assigned[c.name] = true
+		} else if rightName == "" {
+			rightName = c.name
+			assigned[c.name] = true
 		}
+	}
+
+	// Update and save the map with current serials.
+	needSave := false
+	for _, c := range controllers {
+		if c.serial == "" {
+			continue
+		}
+		if c.name == leftName && cm.Left != c.serial {
+			cm.Left = c.serial
+			needSave = true
+		}
+		if c.name == rightName && cm.Right != c.serial {
+			cm.Right = c.serial
+			needSave = true
+		}
+	}
+	if needSave {
+		saveControllerMap(calibDir, cm)
+		fmt.Printf("[vr] controller map saved: left=%s right=%s\n", cm.Left, cm.Right)
+	} else if cm.Left != "" || cm.Right != "" {
+		fmt.Printf("[vr] controller map: left=%s right=%s\n", cm.Left, cm.Right)
+	}
+
+	if leftName != "" {
+		left = &leftName
+	}
+	if rightName != "" {
+		right = &rightName
 	}
 	return
 }
 
-func hapticPulse(idx uint32, intensity, durationMs float64) {
-	us := intensity * durationMs * 1000
-	if us < 1 {
-		us = 1
-	}
-	if us > 65535 {
-		us = 65535
-	}
-	C.vr_haptic_pulse(C.uint(idx), C.ushort(us))
+func hapticPulse(name string, intensity, durationMs float64) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	C.vr_haptic(cName, C.float(intensity), C.float(durationMs/1000.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -473,15 +576,15 @@ func saveCalib(yaw float64, dir string) {
 }
 
 func computeCalibYaw(m mgl64.Mat4) (float64, bool) {
-	// Controller's -Z axis (forward) is the negated third column of the rotation.
-	cfx := -m.At(0, 2)
-	cfz := -m.At(2, 2)
-	mag := math.Sqrt(cfx*cfx + cfz*cfz)
+	// Controller's +Y axis (forward in libsurvive) is the second column of the rotation.
+	cfx := m.At(0, 1)
+	cfy := m.At(1, 1)
+	mag := math.Sqrt(cfx*cfx + cfy*cfy)
 	if mag < 1e-6 {
 		return 0, false
 	}
-	// Yaw = angle from SteamVR -Z to the user's forward, around +Y axis.
-	return math.Atan2(cfx/mag, -cfz/mag), true
+	// Yaw = angle from +Y to the user's forward, around +Z axis.
+	return math.Atan2(-cfx/mag, cfy/mag), true
 }
 
 func applyCalib(cs ControllerState) ControllerState {
@@ -497,8 +600,8 @@ func applyCalib(cs ControllerState) ControllerState {
 	}
 	cosY := math.Cos(yaw)
 	sinY := math.Sin(yaw)
-	x, z := cs.Pos[0], cs.Pos[2]
-	cs.Pos = [3]float64{x*cosY - z*sinY, cs.Pos[1], x*sinY + z*cosY}
+	x, y := cs.Pos[0], cs.Pos[1]
+	cs.Pos = [3]float64{x*cosY - y*sinY, x*sinY + y*cosY, cs.Pos[2]}
 	// Rotation is NOT modified here — calibration yaw only affects position.
 	// The rotation offset is computed as a delta (curRot * inv(ctrlRef)) which
 	// is independent of any global yaw, so applying yaw here would conjugate
@@ -515,6 +618,34 @@ type pose struct {
 	ox, oy, oz, thetaDeg float64
 }
 
+// exceedsDeadzone returns true if the new pose differs from the last-sent pose
+// by more than the given position (mm) or rotation (degrees) thresholds.
+// If lastSent is nil (first frame), always returns true.
+func exceedsDeadzone(lastSent *pose, newPose pose, posMM, rotDeg float64) bool {
+	if lastSent == nil {
+		return true
+	}
+	if posMM <= 0 && rotDeg <= 0 {
+		return true
+	}
+
+	dx := newPose.x - lastSent.x
+	dy := newPose.y - lastSent.y
+	dz := newPose.z - lastSent.z
+	posDist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+
+	dotOV := lastSent.ox*newPose.ox + lastSent.oy*newPose.oy + lastSent.oz*newPose.oz
+	dotOV = math.Max(-1, math.Min(1, dotOV))
+	axisDeg := math.Acos(dotOV) * 180 / math.Pi
+	thetaDiff := math.Abs(newPose.thetaDeg - lastSent.thetaDeg)
+	rotDist := axisDeg + thetaDiff
+
+	posExceeds := posMM <= 0 || posDist > posMM
+	rotExceeds := rotDeg <= 0 || rotDist > rotDeg
+
+	return posExceeds || rotExceeds
+}
+
 type teleopHand struct {
 	name        string
 	armName     string
@@ -522,7 +653,7 @@ type teleopHand struct {
 	arm         arm.Arm
 	gripper     gripper.Gripper // nil if no gripper
 	motionSvc   motion.Service
-	deviceIdx   *uint32
+	deviceName  *string
 	scale       float64
 	rotEnabled  bool
 	absoluteRot bool
@@ -550,7 +681,7 @@ type teleopHand struct {
 	// reference capture (on grip press)
 	ctrlRefPos      [3]float64
 	ctrlRefRotRobot mgl64.Mat4
-	calibTransform  mgl64.Mat4 // steamVRTransform * calibYaw, captured at grip press
+	calibTransform  mgl64.Mat4 // lighthouseTransform * calibYaw, captured at grip press
 	robotRefPos     [3]float64
 	robotRefMat     mgl64.Mat4
 	ctrlToArmOffset mgl64.Mat4
@@ -784,14 +915,14 @@ func (h *teleopHand) startControl(ctx context.Context, cs ControllerState) {
 
 		h.ctrlRefPos = cs.Pos
 
-		// Build calibrated rotation transform: steamVRTransform * yawM.
+		// Build calibrated rotation transform: lighthouseTransform * yawM.
 		calibMu.RLock()
 		yaw := calibYaw
 		calibMu.RUnlock()
-		h.calibTransform = steamVRTransform
+		h.calibTransform = lighthouseTransform
 		if yaw != 0 {
-			yawM := mgl64.HomogRotate3DY(yaw)
-			h.calibTransform = steamVRTransform.Mul4(yawM)
+			yawM := mgl64.HomogRotate3DZ(yaw)
+			h.calibTransform = lighthouseTransform.Mul4(yawM)
 		}
 
 		// Similarity transform: T * M * T^-1 maps controller rotation to robot frame.
@@ -845,7 +976,7 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 		return
 	}
 
-	// Position: delta in SteamVR space → rotate by calibTransform → robot frame.
+	// Position: delta in Lighthouse space → rotate by calibTransform → robot frame.
 	dx := cs.Pos[0] - h.ctrlRefPos[0]
 	dy := cs.Pos[1] - h.ctrlRefPos[1]
 	dz := cs.Pos[2] - h.ctrlRefPos[2]
@@ -860,7 +991,7 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 	if h.rotEnabled {
 		if h.absoluteRot {
 			absRotRobot := h.calibTransform.Mul4(cs.Mat)
-			gripCorrection := mgl64.HomogRotate3DX(math.Pi / 2).Mul4(mgl64.HomogRotate3DZ(math.Pi / 2))
+			gripCorrection := mgl64.HomogRotate3DX(math.Pi / 2).Mul4(mgl64.HomogRotate3DZ(70.0 * math.Pi / 180.0))
 			corrected := absRotRobot.Mul4(gripCorrection)
 			tox, toy, toz, thetaDeg = mat4ToOVDeg(corrected)
 		} else {
@@ -903,6 +1034,12 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 				fmt.Printf("[%s] teleop_move err: %v\n", h.name, err)
 				h.errorTimeout = time.Now().Add(errorCooldown)
 				h.sendHaptic(0.8, 200)
+				// If the server-side pipeline died, stop sending moves.
+				if strings.Contains(err.Error(), "not running") {
+					h.teleopActive = false
+					h.isControlling = false
+					fmt.Printf("[%s] teleop session lost, releasing control\n", h.name)
+				}
 			}
 		}()
 	}
@@ -964,8 +1101,8 @@ func (h *teleopHand) returnToPose(ctx context.Context) {
 }
 
 func (h *teleopHand) sendHaptic(intensity, durationMs float64) {
-	if h.deviceIdx != nil {
-		hapticPulse(*h.deviceIdx, intensity, durationMs)
+	if h.deviceName != nil {
+		hapticPulse(*h.deviceName, intensity, durationMs)
 	}
 }
 
@@ -983,62 +1120,61 @@ func (h *teleopHand) toggleRotMode() {
 // Poll loop
 // ---------------------------------------------------------------------------
 
-func initVR(manifestPath string) int {
-	cPath := C.CString(manifestPath)
+func initVR(pluginPath string) int {
+	cPath := C.CString(pluginPath)
 	defer C.free(unsafe.Pointer(cPath))
 	return int(C.vr_init(cPath))
 }
 
-func pollLoop(ctx context.Context, hz int, manifestPath string, left, right *teleopHand) {
+func pollLoop(ctx context.Context, hz int, calibDir, pluginLib, leftCtrl, rightCtrl string, left, right *teleopHand) {
 	interval := time.Duration(float64(time.Second) / float64(hz))
 	fmt.Printf("[teleop] Polling at %d Hz (%.1f ms)\n", hz, float64(interval)/float64(time.Millisecond))
 
-	dir := filepath.Dir(manifestPath)
-	loadCalib(dir)
+	loadCalib(calibDir)
 
-	var leftIdx, rightIdx *uint32
+	var leftName, rightName *string
 	var wasLeftTrackpad, wasRightTrackpad bool
 	lastScan := time.Time{}
-	vrOK := initVR(manifestPath) == 0
+	vrOK := initVR(pluginLib) == 0
 	if vrOK {
-		fmt.Println("[teleop] OpenVR initialized")
+		fmt.Println("[teleop] libsurvive initialized")
 	} else {
-		fmt.Fprintln(os.Stderr, "[teleop] OpenVR not available, will retry...")
+		fmt.Fprintln(os.Stderr, "[teleop] libsurvive not available, will retry...")
 	}
 
 	for {
 		start := time.Now()
 
 		if time.Since(lastScan) > 2*time.Second {
-			if !vrOK && initVR(manifestPath) == 0 {
+			if !vrOK && initVR(pluginLib) == 0 {
 				vrOK = true
-				fmt.Println("[teleop] OpenVR initialized")
+				fmt.Println("[teleop] libsurvive initialized")
 			}
-			leftIdx, rightIdx = findControllers()
+			leftName, rightName = findControllers(leftCtrl, rightCtrl, calibDir)
 			if left != nil {
-				left.deviceIdx = leftIdx
+				left.deviceName = leftName
 			}
 			if right != nil {
-				right.deviceIdx = rightIdx
+				right.deviceName = rightName
 			}
 			lastScan = time.Now()
 		}
 
-		C.vr_update_input()
+		C.vr_poll_events()
 
-		resolve := func(idx *uint32, isLeft bool) ControllerState {
-			if idx == nil {
+		resolve := func(name *string) ControllerState {
+			if name == nil {
 				return nullController
 			}
-			cs := readController(*idx, isLeft)
+			cs := readController(*name)
 			if cs == nil {
 				return nullController
 			}
 			return *cs
 		}
 
-		leftRaw := resolve(leftIdx, true)
-		rightRaw := resolve(rightIdx, false)
+		leftRaw := resolve(leftName)
+		rightRaw := resolve(rightName)
 
 		// Trackpad rising edge: dispatch by region.
 		for _, tr := range []struct {
@@ -1054,7 +1190,7 @@ func pollLoop(ctx context.Context, hz int, manifestPath string, left, right *tel
 				if y < -0.3 {
 					// Up: calibrate forward direction.
 					if yaw, ok := computeCalibYaw(tr.raw.Mat); ok {
-						saveCalib(yaw, dir)
+						saveCalib(yaw, calibDir)
 						left.sendHaptic(0.3, 80)
 						right.sendHaptic(0.3, 80)
 					}
@@ -1114,6 +1250,8 @@ func main() {
 	rightGripper := flag.String("right-gripper", "left-gripper", "Gripper controlled by the right controller (empty to disable)")
 	scale := flag.Float64("scale", 1.0, "Position scale factor (0.1–3.0)")
 	rotEnabled := flag.Bool("rotation", true, "Enable orientation tracking")
+	leftCtrl := flag.String("left-controller", "", "libsurvive object name for left controller (e.g. WM0)")
+	rightCtrl := flag.String("right-controller", "", "libsurvive object name for right controller (e.g. WM1)")
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -1121,8 +1259,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[teleop] Cannot determine executable path: %v\n", err)
 		os.Exit(1)
 	}
-	manifestPath := filepath.Join(filepath.Dir(exePath), "actions.json")
-	fmt.Printf("[teleop] Action manifest: %s\n", manifestPath)
+	calibDir := filepath.Dir(exePath)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1159,14 +1296,27 @@ func main() {
 
 	defer func() {
 		C.vr_shutdown()
-		fmt.Println("[teleop] OpenVR shut down")
+		fmt.Println("[teleop] libsurvive shut down")
 	}()
 
-	go pollLoop(ctx, *hz, manifestPath, left, right)
+	// SURVIVE_PLUGINS must point to the .so/.dylib file; libsurvive searches
+	// for plugins/ and libsurvive/plugins/ relative to its directory.
+	pluginLib := filepath.Join(calibDir, "libsurvive", "lib", "libsurvive.so")
+	if _, err := os.Stat(pluginLib); err != nil {
+		pluginLib = filepath.Join(calibDir, "libsurvive", "lib", "libsurvive.dylib")
+	}
+	go pollLoop(ctx, *hz, calibDir, pluginLib, *leftCtrl, *rightCtrl, left, right)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	fmt.Println("\n[teleop] Stopped")
 	cancel()
+
+	// Force exit if libsurvive cleanup hangs.
+	go func() {
+		time.Sleep(2 * time.Second)
+		fmt.Fprintln(os.Stderr, "[teleop] Forced exit (libsurvive cleanup hung)")
+		os.Exit(1)
+	}()
 }

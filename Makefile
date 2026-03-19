@@ -1,60 +1,70 @@
-.DEFAULT_GOAL := help
+BIN := vr-teleop
+LIBSURVIVE_REPO ?= https://github.com/viam-labs/libsurvive.git
+LIBSURVIVE_REF  ?= viam-patches
+LIBSURVIVE_DIR  := libsurvive
+LIBSURVIVE_SRC  := libsurvive-src
+LIBSURVIVE_LIB  := $(LIBSURVIVE_DIR)/lib/libsurvive.so
 
--include Makefile.local
+# On macOS, help cmake find homebrew packages and use HIDAPI backend
+CMAKE_EXTRA :=
+ifneq ($(wildcard /opt/homebrew),)
+  CMAKE_EXTRA += -DCMAKE_PREFIX_PATH=/opt/homebrew -DLIBUSB_LIBRARY=/opt/homebrew/lib/libusb-1.0.dylib -DUSE_HIDAPI=ON
+  LIBSURVIVE_LIB := $(LIBSURVIVE_DIR)/lib/libsurvive.dylib
+endif
 
-GO             := $(shell which go 2>/dev/null || echo /usr/local/go/bin/go)
-BIN     := vr-teleop
-HZ      ?= 90
-OPENVR_VERSION ?= v2.5.1
-OPENVR_SDK_DIR := openvr-sdk
-OPENVR_SDK_URL := https://github.com/ValveSoftware/openvr/archive/refs/tags/$(OPENVR_VERSION).tar.gz
+-include .env
+export
 
-.PHONY: help
-help:
-	@echo 'VR Teleop'
-	@echo 'Usage: make [target]'
-	@echo ''
-	@echo 'Available targets:'
-	@echo '  deps     - Download OpenVR SDK and tidy Go modules'
-	@echo '  build    - Build the binary'
-	@echo '  run      - Build and run'
-	@echo '  clean    - Remove SDK and compiled binary'
-	@echo '  help     - Show this help message'
+HZ ?= 90
 
-.PHONY: deps
-deps:
-	@if [ ! -f $(OPENVR_SDK_DIR)/headers/openvr_capi.h ]; then \
-		echo '[teleop] Downloading OpenVR SDK $(OPENVR_VERSION)...'; \
-		mkdir -p $(OPENVR_SDK_DIR); \
-		curl -fsSL $(OPENVR_SDK_URL) \
-			| tar -xz --strip-components=1 -C $(OPENVR_SDK_DIR) \
-			    --wildcards \
-			    '*/headers/openvr_capi.h' \
-			    '*/lib/linux64/libopenvr_api.so'; \
-		echo '[teleop] OpenVR SDK ready at $(OPENVR_SDK_DIR)'; \
-	else \
-		echo '[teleop] OpenVR SDK already present ($(OPENVR_SDK_DIR))'; \
-	fi
-	@if [ ! -f go.mod ]; then \
-		echo '[teleop] Initializing Go module...'; \
-		$(GO) mod init github.com/viam-labs/vr-teleop; \
-	fi
-	@echo '[teleop] Tidying Go modules...'
-	@$(GO) mod tidy
+$(LIBSURVIVE_LIB):
+	@[ -d $(LIBSURVIVE_SRC) ] || git clone --depth 1 --recurse-submodules --branch $(LIBSURVIVE_REF) $(LIBSURVIVE_REPO) $(LIBSURVIVE_SRC)
+	cd $(LIBSURVIVE_SRC) && mkdir -p build && cd build && \
+		cmake .. -DCMAKE_INSTALL_PREFIX=$(CURDIR)/$(LIBSURVIVE_DIR) -DCMAKE_BUILD_TYPE=Release $(CMAKE_EXTRA) && \
+		$(MAKE) -j$$(nproc 2>/dev/null || sysctl -n hw.ncpu) && $(MAKE) install
+	@# macOS: libsurvive plugin loader searches for .so but cmake installs .dylib
+	@for f in $(LIBSURVIVE_DIR)/lib/libsurvive/plugins/*.dylib; do \
+		[ -f "$$f" ] && ln -sf "$$(basename $$f)" "$${f%.dylib}.so"; \
+	done 2>/dev/null; true
 
-.PHONY: build
-build: deps
-	@echo '[teleop] Building...'
-	@$(GO) build -o $(BIN) .
-	@echo '[teleop] Built: $(BIN)'
+$(BIN): $(LIBSURVIVE_LIB) Makefile go.mod *.go
+	go build -o $@ .
 
-.PHONY: run
-run: build
-	@echo '[teleop] Starting at $(HZ) Hz...'
-	@LD_LIBRARY_PATH=$(CURDIR)/$(OPENVR_SDK_DIR)/lib/linux64:$$LD_LIBRARY_PATH \
-		./$(BIN) --hz $(HZ) $(RUN_ARGS)
+build: $(BIN)
 
-.PHONY: clean
+dev: $(BIN)
+	GOTRACEBACK=crash ./$(BIN) --hz $(HZ) \
+		--address $(VIAM_ADDRESS) --key-id $(VIAM_KEY_ID) --key $(VIAM_KEY) \
+		--left-arm $(LEFT_ARM) --left-gripper $(LEFT_GRIPPER) \
+		--right-arm $(RIGHT_ARM) --right-gripper $(RIGHT_GRIPPER) \
+		--left-controller "$(LEFT_CONTROLLER)" \
+		--right-controller "$(RIGHT_CONTROLLER)"
+
+pair: $(LIBSURVIVE_LIB)
+	@echo 'Plug in both Watchman dongles, then power on each controller one at a time.'
+	@echo 'Press Ctrl-C when both controllers are paired.'
+	DYLD_LIBRARY_PATH=$(CURDIR)/$(LIBSURVIVE_DIR)/lib LD_LIBRARY_PATH=$(CURDIR)/$(LIBSURVIVE_DIR)/lib \
+		$(LIBSURVIVE_DIR)/bin/survive-cli --pair-device
+
+test:
+	go test ./...
+
+setup:
+ifeq ($(shell uname -s),Darwin)
+	brew install cmake libusb hidapi zlib
+else
+	sudo apt-get install -y cmake libusb-1.0-0-dev zlib1g-dev
+endif
+	go mod tidy
+
+update:
+	go get go.viam.com/rdk@latest
+	go mod tidy
+
+lint:
+	gofmt -s -w .
+
 clean:
-	@rm -rf $(OPENVR_SDK_DIR) $(BIN)
-	@echo '[teleop] Cleaned.'
+	rm -rf $(LIBSURVIVE_DIR) $(LIBSURVIVE_SRC) $(BIN)
+
+.PHONY: build dev pair test setup update lint clean
