@@ -476,3 +476,54 @@ func TestExceedsDeadzone_OnlyPosThreshold(t *testing.T) {
 		t.Error("expected true: rot threshold 0 disables rot filtering")
 	}
 }
+
+// --------------- EMA smoothing tests ---------------
+
+func TestEmaSmooth_NilPrev(t *testing.T) {
+	raw := pose{x: 10, y: 20, z: 30, ox: 0.1, oy: 0.2, oz: 0.97, thetaDeg: 45}
+	got := emaSmooth(nil, raw, 0.5)
+	if got != raw {
+		t.Errorf("nil prev: got %+v, want %+v", got, raw)
+	}
+}
+
+func TestEmaSmooth_Alpha1(t *testing.T) {
+	prev := pose{x: 100, y: 200, z: 300, ox: 1, oy: 0, oz: 0, thetaDeg: 90}
+	raw := pose{x: 10, y: 20, z: 30, ox: 0, oy: 0, oz: 1, thetaDeg: 45}
+	got := emaSmooth(&prev, raw, 1.0)
+	if got != raw {
+		t.Errorf("alpha=1: got %+v, want %+v", got, raw)
+	}
+}
+
+func TestEmaSmooth_HalfAlpha(t *testing.T) {
+	prev := pose{x: 0, y: 0, z: 0, ox: 0, oy: 0, oz: 0, thetaDeg: 0}
+	raw := pose{x: 10, y: 20, z: 30, ox: 0.4, oy: 0.6, oz: 0.8, thetaDeg: 90}
+	got := emaSmooth(&prev, raw, 0.5)
+	const eps = 1e-9
+	check := func(name string, got, want float64) {
+		if math.Abs(got-want) > eps {
+			t.Errorf("%s: got %f, want %f", name, got, want)
+		}
+	}
+	check("x", got.x, 5)
+	check("y", got.y, 10)
+	check("z", got.z, 15)
+	check("ox", got.ox, 0.2)
+	check("oy", got.oy, 0.3)
+	check("oz", got.oz, 0.4)
+	check("thetaDeg", got.thetaDeg, 45)
+}
+
+func TestEmaSmooth_Convergence(t *testing.T) {
+	target := pose{x: 100, y: 100, z: 100, ox: 0, oy: 0, oz: 1, thetaDeg: 90}
+	var smoothed *pose
+	for i := 0; i < 50; i++ {
+		result := emaSmooth(smoothed, target, 0.3)
+		smoothed = &result
+	}
+	const eps = 0.01
+	if math.Abs(smoothed.x-100) > eps || math.Abs(smoothed.thetaDeg-90) > eps {
+		t.Errorf("did not converge: got x=%.4f theta=%.4f", smoothed.x, smoothed.thetaDeg)
+	}
+}

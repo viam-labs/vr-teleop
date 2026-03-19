@@ -651,6 +651,25 @@ type pose struct {
 	ox, oy, oz, thetaDeg float64
 }
 
+// emaSmooth applies exponential moving average smoothing to a pose.
+// If prev is nil (first frame), returns raw unmodified.
+// alpha in (0,1]: 1 = no smoothing, lower = more smoothing.
+func emaSmooth(prev *pose, raw pose, alpha float64) pose {
+	if prev == nil || alpha >= 1.0 {
+		return raw
+	}
+	b := 1.0 - alpha
+	return pose{
+		x:        alpha*raw.x + b*prev.x,
+		y:        alpha*raw.y + b*prev.y,
+		z:        alpha*raw.z + b*prev.z,
+		ox:       alpha*raw.ox + b*prev.ox,
+		oy:       alpha*raw.oy + b*prev.oy,
+		oz:       alpha*raw.oz + b*prev.oz,
+		thetaDeg: alpha*raw.thetaDeg + b*prev.thetaDeg,
+	}
+}
+
 // exceedsDeadzone returns true if the new pose differs from the last-sent pose
 // by more than the given position (mm) or rotation (degrees) thresholds.
 // If lastSent is nil (first frame), always returns true.
@@ -717,6 +736,10 @@ type teleopHand struct {
 	lastSentPose     *pose   // nil = send next unconditionally
 	deadzoneFiltered int     // count of frames suppressed since last send
 
+	// EMA smoothing state
+	smoothAlpha  float64 // EMA alpha: 1.0 = no smoothing
+	smoothedPose *pose   // nil = first frame, use raw value
+
 	// reference capture (on grip press)
 	ctrlRefPos      [3]float64
 	ctrlRefRotRobot mgl64.Mat4
@@ -732,7 +755,7 @@ const (
 	errorHapticIntvl = 200 * time.Millisecond
 )
 
-func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled bool, posDeadzone, rotDeadzone float64) *teleopHand {
+func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled bool, posDeadzone, rotDeadzone, smoothAlpha float64) *teleopHand {
 	h := &teleopHand{
 		name:            name,
 		armName:         armName,
@@ -745,6 +768,7 @@ func newTeleopHand(name, armName, gripperName string, scale float64, rotEnabled 
 		gripperNotify:   make(chan struct{}, 1),
 		posDeadzone:     posDeadzone,
 		rotDeadzone:     rotDeadzone,
+		smoothAlpha:     smoothAlpha,
 	}
 	h.gripperDesired.Store(830) // start fully open
 	return h
@@ -1003,6 +1027,7 @@ func (h *teleopHand) startControl(ctx context.Context, cs ControllerState) {
 
 		h.errorTimeout = time.Time{}
 		h.lastSentPose = nil
+		h.smoothedPose = nil
 		h.isControlling = true
 		h.sendHaptic(0.5, 100)
 		fmt.Printf("[%s] control started at (%.1f, %.1f, %.1f)\n", h.name, pt.X, pt.Y, pt.Z)
@@ -1050,8 +1075,12 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 		return
 	}
 
+	// EMA smoothing (before deadzone filter).
+	rawCandidate := pose{x: tx, y: ty, z: tz, ox: tox, oy: toy, oz: toz, thetaDeg: thetaDeg}
+	candidate := emaSmooth(h.smoothedPose, rawCandidate, h.smoothAlpha)
+	h.smoothedPose = &candidate
+
 	// Dead-zone filter: suppress command if movement is below threshold.
-	candidate := pose{x: tx, y: ty, z: tz, ox: tox, oy: toy, oz: toz, thetaDeg: thetaDeg}
 	if !exceedsDeadzone(h.lastSentPose, candidate, h.posDeadzone, h.rotDeadzone) {
 		h.deadzoneFiltered++
 		return
@@ -1068,12 +1097,12 @@ func (h *teleopHand) controlFrame(ctx context.Context, cs ControllerState) {
 	if h.motionSvc != nil && h.teleopActive {
 		moveReq := fmt.Sprintf(
 			`{"reference_frame":"world","pose":{"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}}`,
-			tx, ty, tz, tox, toy, toz, thetaDeg,
+			candidate.x, candidate.y, candidate.z, candidate.ox, candidate.oy, candidate.oz, candidate.thetaDeg,
 		)
 		// fmt.Printf("[%s] teleop_move: %s\n", h.name, moveReq)
 		if h.logFile != nil {
 			logEntry := fmt.Sprintf(`{"t":%d,"x":%f,"y":%f,"z":%f,"o_x":%f,"o_y":%f,"o_z":%f,"theta":%f}`+"\n",
-				now.UnixMilli(), tx, ty, tz, tox, toy, toz, thetaDeg)
+				now.UnixMilli(), candidate.x, candidate.y, candidate.z, candidate.ox, candidate.oy, candidate.oz, candidate.thetaDeg)
 			h.logFile.WriteString(logEntry)
 		}
 		if !h.movePending.CompareAndSwap(false, true) {
@@ -1308,6 +1337,7 @@ func main() {
 	rightCtrl := flag.String("right-controller", "", "libsurvive object name for right controller (e.g. WM1)")
 	posDeadzone := flag.Float64("pos-deadzone", 0.5, "Position dead-zone in mm (0 to disable)")
 	rotDeadzone := flag.Float64("rot-deadzone", 1.0, "Rotation dead-zone in degrees (0 to disable)")
+	smoothAlpha := flag.Float64("smooth-alpha", 0.5, "EMA smoothing alpha (0-1, 1=no smoothing)")
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -1340,12 +1370,12 @@ func main() {
 	defer robot.Close(ctx)
 	fmt.Println("[teleop] Connected to robot")
 
-	left := newTeleopHand("left", *leftArm, *leftGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone)
+	left := newTeleopHand("left", *leftArm, *leftGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone, *smoothAlpha)
 	if err := left.connect(ctx, robot); err != nil {
 		fmt.Fprintf(os.Stderr, "[teleop] Left hand: %v\n", err)
 	}
 
-	right := newTeleopHand("right", *rightArm, *rightGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone)
+	right := newTeleopHand("right", *rightArm, *rightGripper, *scale, *rotEnabled, *posDeadzone, *rotDeadzone, *smoothAlpha)
 	if err := right.connect(ctx, robot); err != nil {
 		fmt.Fprintf(os.Stderr, "[teleop] Right hand: %v\n", err)
 	}

@@ -18,6 +18,8 @@ export
 HZ ?= 90
 POS_DEADZONE ?= 3.0
 ROT_DEADZONE ?= 3.0
+# SMOOTH_ALPHA ?= 1.0
+SMOOTH_ALPHA ?= 0.1
 
 $(LIBSURVIVE_LIB):
 	@[ -d $(LIBSURVIVE_SRC) ] || git clone --depth 1 --recurse-submodules --branch $(LIBSURVIVE_REF) $(LIBSURVIVE_REPO) $(LIBSURVIVE_SRC)
@@ -39,7 +41,8 @@ dev: $(BIN)
 		--address $(VIAM_ADDRESS) --key-id $(VIAM_KEY_ID) --key $(VIAM_KEY) \
 		--left-arm $(LEFT_ARM) --left-gripper $(LEFT_GRIPPER) \
 		--right-arm $(RIGHT_ARM) --right-gripper $(RIGHT_GRIPPER) \
-		--pos-deadzone $(POS_DEADZONE) --rot-deadzone $(ROT_DEADZONE)
+		--pos-deadzone $(POS_DEADZONE) --rot-deadzone $(ROT_DEADZONE) \
+		--smooth-alpha $(SMOOTH_ALPHA)
 
 pair: $(LIBSURVIVE_LIB)
 	@echo 'Plug in both Watchman dongles, then power on each controller one at a time.'
