@@ -10,18 +10,17 @@ HTC Vive VR controller tracking and arm teleop for Viam robots. Uses [libsurvive
 
 ## Configure vive-controller
 
-```jsonc
+```json
 {
-  "name": "left-vive",
-  "api": "rdk:component:input_controller",
-  "model": "viam:vive:vive-controller",
-  "attributes": {
-    // Serial number of the physical controller (stable across restarts).
-    // Optional — if omitted, controllers are assigned in discovery order.
-    "serial_number": "LHR-FEC592B1"
-  }
+  "serial_number": "LHR-FEC592B1",
+  "device_name": ""
 }
 ```
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `serial_number` | string | Serial number of the physical controller (stable across restarts). Optional — if omitted, controllers are assigned in discovery order. |
+| `device_name` | string | Libsurvive device name (e.g. `"WM0"`). Optional — typically auto-discovered. |
 
 ### Controls
 
@@ -68,46 +67,51 @@ Returns:
 
 ## Configure teleop service
 
-```jsonc
+```json
 {
-  "name": "teleop",
-  "api": "rdk:service:generic",
-  "model": "viam:vive:teleop",
-  "attributes": {
-    // Polling rate in Hz (default: 90)
-    "hz": 90,
-    "hands": [
-      {
-        "name": "left",
-        // Name of the vive-controller component
-        "controller": "left-vive",
-        // Name of the arm component to control
-        "arm": "right-arm",
-        // Name of the gripper component (optional)
-        "gripper": "right-gripper",
-        // Position multiplier (default: 1.0). 2.0 = arm moves 2x your hand movement.
-        "scale": 1.0,
-        // Enable orientation tracking (default: true)
-        "rotation_enabled": true,
-        // Position dead-zone in mm (default: 0.5). Suppresses jitter.
-        "pos_deadzone_mm": 0.5,
-        // Rotation dead-zone in degrees (default: 1.0)
-        "rot_deadzone_deg": 1.0,
-        // EMA smoothing alpha, 0–1 (default: 0.5). Lower = smoother, higher = more responsive.
-        "smooth_alpha": 0.5
-      },
-      {
-        "name": "right",
-        "controller": "right-vive",
-        "arm": "left-arm",
-        "gripper": "left-gripper"
-      }
-    ],
-    // Directory for calibration/controller map files (default: executable directory)
-    "calibration_dir": "/data"
-  }
+  "hz": 90,
+  "hands": [
+    {
+      "name": "left",
+      "controller": "left-vive",
+      "arm": "right-arm",
+      "gripper": "right-gripper",
+      "scale": 1.0,
+      "rotation_enabled": true,
+      "pos_deadzone_mm": 0.5,
+      "rot_deadzone_deg": 1.0,
+      "smooth_alpha": 0.5
+    },
+    {
+      "name": "right",
+      "controller": "right-vive",
+      "arm": "left-arm",
+      "gripper": "left-gripper"
+    }
+  ],
+  "calibration_dir": "/data"
 }
 ```
+
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `hz` | int | `90` | Polling rate in Hz. |
+| `hands` | array | *required* | List of hand configurations (at least one). |
+| `calibration_dir` | string | executable dir | Directory for calibration and controller map files. |
+
+**Hand attributes:**
+
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | *required* | Hand identifier (e.g. `"left"`, `"right"`). |
+| `controller` | string | *required* | Name of the `vive-controller` component. |
+| `arm` | string | *required* | Name of the arm component to control. |
+| `gripper` | string | | Name of the gripper component. Trigger controls proportional grip. |
+| `scale` | float | `1.0` | Position multiplier. `2.0` = arm moves 2x your hand movement. |
+| `rotation_enabled` | bool | `true` | Enable orientation tracking. |
+| `pos_deadzone_mm` | float | `0.5` | Position dead-zone in mm. Suppresses jitter. |
+| `rot_deadzone_deg` | float | `1.0` | Rotation dead-zone in degrees. |
+| `smooth_alpha` | float | `0.5` | EMA smoothing alpha (0-1). Lower = smoother, higher = more responsive. |
 
 ### VR Controls
 
